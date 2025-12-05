@@ -1,182 +1,100 @@
 #!/bin/bash
 
 echo "======================================="
-echo "ZK Age Verification Circuit Generation"
+echo "ZK Age Verification Circuit with Garaga"
 echo "======================================="
+
+# 0. Ensure Garaga is installed
+if ! command -v garaga &> /dev/null; then
+    echo "Installing Garaga CLI..."
+    pip install garaga
+fi
 
 # Create build directory
 mkdir -p build
 
-echo ""
-echo "1. Compiling the circuit..."
-echo "---------------------------"
+# 1. Compile the circuit
+if [ ! -f "age.circom" ]; then
+cat > age.circom << 'EOF'
+pragma circom 2.1.6;
 
-# Compile the circuit
-circom age.circom --r1cs --wasm --sym -o build
+template AgeVerification() {
+    signal input birthYear;      // Private
+    signal input currentYear;    // Public
+    signal output isAdult;
+    signal age;
+    age <== currentYear - birthYear;
+    signal diff;
+    diff <== age - 18;
+    component rangeCheck = Num2Bits(32);
+    rangeCheck.in <== diff;
+    isAdult <== 1;
+}
 
-if [ $? -eq 0 ]; then
-    echo "✅ Circuit compiled successfully!"
-else
-    echo "❌ Circuit compilation failed. Trying simpler circuit..."
-    
-    # Try simpler circuit
-    circom simple_multiplier.circom --r1cs --wasm --sym -o build
-    if [ $? -ne 0 ]; then
-        echo "❌ Failed to compile any circuit."
-        exit 1
-    fi
-    echo "✅ Simple circuit compiled successfully!"
+template Num2Bits(n) {
+    signal input in;
+    signal output out[n];
+    var lc = 0;
+    for (var i = 0; i < n; i++) {
+        out[i] <-- (in >> i) & 1;
+        out[i] * (out[i] - 1) === 0;
+        lc += out[i] * (1 << i);
+    }
+    lc === in;
+}
+
+component main { public [ currentYear ] } = AgeVerification();
+EOF
+    echo "✅ Created age.circom"
 fi
 
-echo ""
-echo "2. Creating input files..."
-echo "--------------------------"
+circom age.circom --r1cs --wasm --sym -o build
 
-# Create input for age circuit
-cat > age_input.json <<EOF
+# 2. Generate input file
+cat > input.json <<EOF
 {
   "currentYear": 2024,
   "birthYear": 1990
 }
 EOF
 
-# Create input for multiplier circuit
-cat > multiplier_input.json <<EOF
-{
-  "a": 3,
-  "b": 4
-}
-EOF
-
-echo ""
-echo "3. Generating witness..."
-echo "------------------------"
-
-# Determine which circuit was compiled
-if [ -f "build/age_js/generate_witness.js" ]; then
-    cd build/age_js
-    node generate_witness.js age.wasm ../../age_input.json ../witness.wtns
-    CIRCUIT_NAME="age"
-elif [ -f "build/simple_multiplier_js/generate_witness.js" ]; then
-    cd build/simple_multiplier_js
-    node generate_witness.js simple_multiplier.wasm ../../multiplier_input.json ../witness.wtns
-    CIRCUIT_NAME="simple_multiplier"
-else
-    echo "❌ No compiled circuit found!"
-    exit 1
-fi
-
+# 3. Generate witness
+cd build/age_js
+node generate_witness.js age.wasm ../../input.json ../witness.wtns
 cd ../..
 
-if [ $? -eq 0 ]; then
-    echo "✅ Witness generated successfully!"
-else
-    echo "❌ Witness generation failed!"
-    exit 1
+# 4. Powers of Tau
+if [ ! -f "pot10_final.ptau" ]; then
+    snarkjs powersoftau new bn128 10 pot10_0000.ptau -v
+    snarkjs powersoftau contribute pot10_0000.ptau pot10_0001.ptau --name="Test" -v -e="random"
+    snarkjs powersoftau prepare phase2 pot10_0001.ptau pot10_final.ptau -v
 fi
 
-echo ""
-echo "4. Downloading Powers of Tau..."
-echo "-------------------------------"
+# 5. Groth16 setup
+snarkjs groth16 setup build/age.r1cs pot10_final.ptau build/circuit_0000.zkey
+snarkjs zkey contribute build/circuit_0000.zkey build/circuit_0001.zkey --name="First contribution" -v -e="random text"
+snarkjs zkey beacon build/circuit_0001.zkey build/circuit_final.zkey \
+    0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f 10 -n="Final Beacon"
 
-# Use a working Powers of Tau file
-if [ ! -f "pot12_final.ptau" ]; then
-    echo "Downloading Powers of Tau file..."
-    # Try different URLs
-    wget https://hermez.s3-eu-west-1.amazonaws.com/powersOfTau28_hez_final_12.ptau -O pot12_final.ptau 2>/dev/null || \
-    wget https://storage.googleapis.com/zcash-era-setup/powersOfTau28_hez_final_12.ptau -O pot12_final.ptau 2>/dev/null || \
-    echo "Failed to download. Please manually download:"
-    echo "https://storage.googleapis.com/zcash-era-setup/powersOfTau28_hez_final_12.ptau"
-    echo "and save as pot12_final.ptau"
-    echo ""
-    echo "For now, we'll create a test file..."
-    # Create a small test with snarkjs
-    npx snarkjs powersoftau new bn128 12 pot12_0000.ptau -v > /dev/null 2>&1
-    npx snarkjs powersoftau contribute pot12_0000.ptau pot12_0001.ptau --name="Test" -v -e="random" > /dev/null 2>&1
-    npx snarkjs powersoftau prepare phase2 pot12_0001.ptau pot12_final.ptau -v > /dev/null 2>&1
-fi
-
-echo ""
-echo "5. Setting up Groth16..."
-echo "------------------------"
-
-if [ -f "build/age.r1cs" ]; then
-    R1CS_FILE="build/age.r1cs"
-elif [ -f "build/simple_multiplier.r1cs" ]; then
-    R1CS_FILE="build/simple_multiplier.r1cs"
-else
-    echo "❌ No R1CS file found!"
-    exit 1
-fi
-
-# Install snarkjs globally or locally
-if ! command -v snarkjs &> /dev/null; then
-    echo "Installing snarkjs..."
-    npm install -g snarkjs
-fi
-
-# Generate zkey
-snarkjs groth16 setup $R1CS_FILE pot12_final.ptau build/circuit_final.zkey
-
-if [ $? -eq 0 ]; then
-    echo "✅ Groth16 setup completed!"
-else
-    echo "❌ Groth16 setup failed!"
-    exit 1
-fi
-
-echo ""
-echo "6. Exporting verification key..."
-echo "--------------------------------"
-
-snarkjs zkey export verificationkey build/circuit_final.zkey build/verification_key.json
-
-echo ""
-echo "7. Generating proof..."
-echo "----------------------"
-
+# 6. Generate proof with snarkjs
 snarkjs groth16 prove build/circuit_final.zkey build/witness.wtns build/proof.json build/public.json
 
-if [ $? -eq 0 ]; then
-    echo "✅ Proof generated successfully!"
-else
-    echo "❌ Proof generation failed!"
-    exit 1
-fi
+# 7. Generate Garaga Cairo verifier
+garaga starknet generate-verifier \
+    --zkey build/circuit_final.zkey \
+    --output garaga_verifier
 
-echo ""
-echo "8. Verifying proof..."
-echo "---------------------"
+# 8. Convert snarkjs proof → Starknet-compatible proof
+garaga starknet format-proof \
+    --proof build/proof.json \
+    --public build/public.json \
+    --config garaga_verifier/verifier_config.json \
+    --output garaga_proof.json
 
-snarkjs groth16 verify build/verification_key.json build/public.json build/proof.json
-
-if [ $? -eq 0 ]; then
-    echo "✅ Proof verified successfully!"
-else
-    echo "❌ Proof verification failed!"
-    exit 1
-fi
-
-echo ""
-echo "9. Generating Solidity verifier..."
-echo "----------------------------------"
-
-snarkjs zkey export solidityverifier build/circuit_final.zkey build/Verifier.sol
-
-echo ""
-echo "10. Generating call data..."
-echo "---------------------------"
-
-snarkjs generatecall build/public.json build/proof.json > build/calldata.txt
-
-echo ""
 echo "======================================="
-echo "Generation Complete! 🎉"
+echo "✅ Garaga verifier Cairo contract: garaga_verifier/verifier.cairo"
+echo "✅ Starknet-compatible proof: garaga_proof.json"
+echo "Next steps:"
+echo "1. Deploy garaga_verifier/verifier.cairo to Starknet"
+echo "2. Call verifyProof with garaga_proof.json as calldata"
 echo "======================================="
-echo ""
-echo "Generated files in build/ directory:"
-ls -la build/
-echo ""
-echo "To use with StarkNet/Giza:"
-echo "1. Install Giza: pip install giza-cli"
-echo "2. Transpile: giza transpile age.circom --output age.cairo"

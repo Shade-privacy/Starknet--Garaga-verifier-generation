@@ -1,0 +1,8 @@
+1,1,1,main.isAdult
+2,2,1,main.currentYear
+3,3,1,main.birthYear
+4,4,1,main.age
+5,5,1,main.diff
+6,-1,0,main.check.out
+7,-1,0,main.check.in
+8,6,0,main.check.dummy
