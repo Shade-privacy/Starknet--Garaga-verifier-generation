@@ -80,12 +80,12 @@ snarkjs zkey beacon build/circuit_0001.zkey build/circuit_final.zkey \
 snarkjs groth16 prove build/circuit_final.zkey build/witness.wtns build/proof.json build/public.json
 
 # 7. Generate Garaga Cairo verifier
-garaga starknet generate-verifier \
-    --zkey build/circuit_final.zkey \
-    --output garaga_verifier
+
+
+garaga gen --zkey build/circuit_final.zkey --output garaga_verifier
 
 # 8. Convert snarkjs proof → Starknet-compatible proof
-garaga starknet format-proof \
+garaga calldata \
     --proof build/proof.json \
     --public build/public.json \
     --config garaga_verifier/verifier_config.json \
