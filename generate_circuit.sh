@@ -83,7 +83,7 @@ snarkjs groth16 prove build/circuit_final.zkey build/witness.wtns build/proof.js
 
 
 garaga gen --zkey build/circuit_final.zkey --output garaga_verifier
-
+garaga gen --system groth16 --vk build/verification_key.json --project-name groth16_age_verification
 # 8. Convert snarkjs proof → Starknet-compatible proof
 garaga calldata \
     --proof build/proof.json \
